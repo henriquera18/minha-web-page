@@ -1,0 +1,126 @@
+# ======= IMPORTAÇÕES =======
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
+import matplotlib.pyplot as plt
+import os
+import csv
+
+# ======= CONFIGURAÇÕES =======
+TOKEN = '8025778957:AAERWvcrdy09Dxow-dHuSA2P0IzzGPxLyMQ'
+URL = 'https://www.noticiasagricolas.com.br/cotacoes/'
+ARQUIVO_CSV = 'cotacoes.csv'
+
+# ======= COMANDO /start =======
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    dados = atualizar()
+    context.user_data['dados'] = dados
+    mensagem = (
+        "👩‍🌾 Olá, seja bem-vindo ao Bot de Cotações Agrícolas!\n\n"
+        "📊 Aqui você pode consultar os preços atualizados de produtos do agronegócio.\n"
+        "👉 Escolha um produto abaixo para ver as cotações e gráficos.\n"
+    )
+    await exibir_menu(update, context, mensagem)
+
+# ======= EXIBE MENU DE PRODUTOS =======
+async def exibir_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, texto='👋 Escolha o produto:'):
+    dados = context.user_data.get('dados', [])
+    produtos = sorted(set(d[0] for d in dados if d[2]))
+    if not produtos:
+        texto = "⚠️ Nenhuma cotação disponível no momento. Tente novamente mais tarde."
+    botoes = [[InlineKeyboardButton(f'🌽 {p}', callback_data=p)] for p in produtos]
+    markup = InlineKeyboardMarkup(botoes)
+    if update.message:
+        await update.message.reply_text(texto, reply_markup=markup)
+    else:
+        await update.callback_query.message.reply_text(texto, reply_markup=markup)
+
+# ======= RESPOSTAS A BOTÕES =======
+async def responder_botao(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    produto = query.data
+
+    if produto == 'voltar_menu':
+        await start(update, context)
+        return
+
+    dados = context.user_data.get('dados', [])
+    filtrados = [d for d in dados if d[0] == produto and d[2]]
+    if not filtrados:
+        await query.message.reply_text('⚠️ Nenhuma cotação disponível.',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🔙 Voltar ao Menu', callback_data='voltar_menu')]]))
+        return
+
+    msg = f"<b>{produto.upper()}</b> - {datetime.now():%d/%m/%Y}\n"
+    cidades = []
+    precos = []
+    for _, local, preco in filtrados:
+        msg += f"📍 <b>{local}</b>\n💰 R$ {float(preco):.2f}\n────\n"
+        cidades.append(local)
+        precos.append(float(preco))
+
+    caminho = f"grafico_{produto}.png"
+    plt.figure(figsize=(9, 5))
+    plt.bar(cidades, precos, color='green')
+    plt.xticks(rotation=45, ha='right')
+    plt.ylabel('Preço (R$)')
+    plt.title(f'Comparativo de Preços - {produto}')
+    plt.tight_layout()
+    plt.savefig(caminho)
+    plt.close()
+
+    await query.message.reply_photo(
+        photo=open(caminho, 'rb'),
+        caption=msg,
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🔙 Voltar ao Menu', callback_data='voltar_menu')]])
+    )
+
+# ======= MENSAGEM PADRÃO CASO NÃO COMANDO =======
+async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text('ℹ️ Use /start para começar.')
+
+# ======= ATUALIZAÇÃO VIA WEBSCRAPING =======
+def atualizar():
+    dados = extrair()
+    salvar_csv(dados)
+    return dados
+
+# ======= WEBSCRAPING DO SITE =======
+def extrair():
+    r = requests.get(URL)
+    s = BeautifulSoup(r.text, 'html.parser')
+    resultados = []
+    produto = ''
+    for el in s.find_all(['h2', 'table']):
+        if el.name == 'h2':
+            produto = el.text.strip()
+        elif el.name == 'table':
+            for linha in el.select('tr')[1:]:
+                cols = linha.select('td')
+                if len(cols) >= 2:
+                    local = cols[0].get_text(strip=True)
+                    preco = cols[1].get_text(strip=True).replace('R$', '').replace(',', '.').strip()
+                    try:
+                        preco_float = float(preco)
+                        resultados.append([produto, local, preco_float])
+                    except:
+                        continue
+    return resultados
+
+# ======= SALVA CSV (OPCIONAL) =======
+def salvar_csv(dados):
+    with open(ARQUIVO_CSV, 'w', newline='', encoding='utf-8') as f:
+        csv.writer(f).writerows([['Produto', 'Local', 'Preco']] + dados)
+
+# ======= INICIALIZAÇÃO DO BOT =======
+if __name__ == '__main__':
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(CallbackQueryHandler(responder_botao))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback))
+    print("🤖 Bot rodando...")
+    app.run_polling()
